@@ -1,6 +1,8 @@
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { QdrantClient } from "@qdrant/js-client-rest";
+import { tavily } from "@tavily/core";
+
 
 dotenv.config();
 
@@ -13,6 +15,9 @@ const qdrant = new QdrantClient({
     apiKey: process.env.QDRANT_API_KEY
 });
 
+const tvly = tavily({
+    apiKey: process.env.TAVILY_API_KEY
+});
 const COLLECTION_NAME = "employee_documents";
 
 const question =
@@ -203,20 +208,59 @@ Use:
     if (!secondEvaluation.relevant) {
 
         console.log("\nCRAG: RETRIEVAL STILL NOT RELEVANT.");
+        console.log("CRAG: Using fallback knowledge source...");
 
-        console.log(
-            "CRAG: No reliable information found."
-        );
+        const webResponse = await tvly.search(correctedQuery);
 
-        console.log(
-            "\nFINAL ANSWER:"
-        );
+        console.log("\nEXTERNAL SEARCH RESULTS:");
 
-        console.log(
-            "I don't know based on the available information."
-        );
+        for (const result of webResponse.results) {
+            console.log("TITLE:", result.title);
+            console.log("URL:", result.url);
+            console.log("CONTENT:", result.content);
+            console.log("--------------------");
+        }
 
-        process.exit();
+        const webContext = webResponse.results
+            .map((result, index) => `Source ${index + 1}:
+            Title: ${result.title}
+            URL: ${result.url}
+            Content: ${result.content}
+            `)
+            .join("\n");
+
+        const fallbackPrompt = `
+Answer the user's question using the external search
+results provided below.
+
+Question:
+${question}
+
+External search results:
+${webContext}
+
+Use only information supported by the search results.
+If the search results do not contain enough information,
+say "I don't know."
+
+Give a clear and concise answer.
+`;
+
+        const fallbackResponse =
+            await client.models.generateContent({
+                model: "gemini-3.5-flash-lite",
+                contents: fallbackPrompt
+            });
+
+        console.log("\nCRAG FALLBACK ANSWER:");
+        console.log(fallbackResponse.text);
+
+        console.log("\nSOURCES:");
+
+        for (const result of webResponse.results) {
+            console.log("-", result.title);
+            console.log(" ", result.url);
+        }
     }
 }
 
