@@ -265,3 +265,4 @@ Give a clear and concise answer.
 }
 
 
+//CRAG evaluates the quality of retrieved information and takes corrective action when retrieval is poor. Self-RAG adds reflection around the generation process, evaluating whether the generated answer is supported by the retrieved context and regenerating or abstaining when it isn't.
