@@ -1,8 +1,14 @@
-import dotenv from 'dotenv';
+import dotenv from "dotenv";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { GoogleGenAI } from "@google/genai";
+import fs from "fs";
 
 dotenv.config();
+
+
+// ===============================
+// CLIENT SETUP
+// ===============================
 
 const qdrant = new QdrantClient({
     url: process.env.QDRANT_URL,
@@ -15,146 +21,679 @@ const client = new GoogleGenAI({
 
 const COLLECTION_NAME = "employee_documents";
 
+
+// ===============================
+// EVALUATION DATA
+// ===============================
+
 const evaluationData = [
+
     {
         question: "How many vacation days do employees get?",
-        relevantTexts: [
+
+        contexts: [
             "Employees receive 20 days of paid annual leave."
-        ]
+        ],
+
+        groundTruth:
+            "Employees receive 20 days of paid annual leave."
     },
 
     {
         question: "How many days can employees work remotely?",
-        relevantTexts: [
+
+        contexts: [
             "Employees can work remotely two days per week."
-        ]
+        ],
+
+        groundTruth:
+            "Employees can work remotely two days per week."
     },
 
     {
         question: "What healthcare benefit does the company provide?",
-        relevantTexts: [
+
+        contexts: [
             "The company provides health insurance to full-time employees."
-        ]
+        ],
+
+        groundTruth:
+            "The company provides health insurance to full-time employees."
     },
 
     {
         question: "Who must approve leave requests?",
-        relevantTexts: [
+
+        contexts: [
             "Employees must submit leave requests to their manager."
-        ]
+        ],
+
+        groundTruth:
+            "The provided information does not specify who approves leave requests; it only states that requests must be submitted to the employee's manager."
     },
+
     {
         question: "What is the company's leave policy?",
-        relevantTexts: [
+
+        contexts: [
             "Employees receive 20 days of paid annual leave.",
             "Employees must submit leave requests to their manager."
-        ]
+        ],
+
+        groundTruth:
+            "Employees receive 20 days of paid annual leave, and leave requests must be submitted to the employee's manager."
     }
+
 ];
 
-// console.log(evaluationData);
 
-// let hit = 0;
+// ===============================
+// RETRIEVAL FUNCTION
+// ===============================
+
+async function retrieveDocuments(question) {
+
+    const embeddingResponse =
+        await client.models.embedContent({
+            model: "gemini-embedding-001",
+            contents: question
+        });
+
+    const queryEmbedding =
+        embeddingResponse.embeddings[0].values;
+
+    const searchResponse =
+        await qdrant.query(
+            COLLECTION_NAME,
+            {
+                query: queryEmbedding,
+                limit: 3,
+                with_payload: true
+            }
+        );
+
+    return searchResponse.points;
+}
+
+
+// ===============================
+// GENERATE ANSWER
+// ===============================
+
+async function generateAnswer(question, context) {
+
+    const prompt = `
+Answer the question using only the provided context.
+
+Context:
+${context}
+
+Question:
+${question}
+
+Answer clearly and concisely.
+`;
+
+    const response =
+        await client.models.generateContent({
+            model: "gemini-3.5-flash-lite",
+            contents: prompt
+        });
+
+    return response.text.trim();
+}
+
+
+// ===============================
+// EVALUATION COUNTERS
+// ===============================
+
 let totalRecall = 0;
 
+let totalContextPrecision = 0;
+
+let totalContextRecall = 0;
+
+let totalFaithfulness = 0;
+
+let totalAnswerRelevance = 0;
+
+let totalAnswerCorrectness = 0;
+
+
+// ===============================
+// STORE ALL EVALUATION RESULTS
+// ===============================
+
+const evaluationResults = [];
+
+
+// ===============================
+// MAIN EVALUATION
+// ===============================
+
 for (const item of evaluationData) {
-    console.log(`Evaluating question: ${item.question}`);
-    const embeddingResponse = await client.models.embedContent({
-        model: "gemini-embedding-001",
-        contents: item.question
-    })
 
-    const queryEmbedding = embeddingResponse.embeddings[0].values;
-
-    const searchResponse = await qdrant.query(
-        COLLECTION_NAME,
-        {
-            query: queryEmbedding,
-            limit: 3,
-            with_payload: true,
-        })
+    console.log("\n=================================");
+    console.log("QUESTION:", item.question);
 
 
-    //HIT RATE EVALUATION
-    // const found = searchResponse.points.some(
-    //     result =>
-    //         result.payload.text
-    //             .toLowerCase()
-    //             .includes(item.expectedText.toLowerCase())
-    // );
-    // if (found) {
-    //     console.log(` Found expected text: "${item.expectedText}"`);
-    //     hit++;
-    // } else {
-    //     console.log(` Did not find expected text: "${item.expectedText}"`);
-    // }
+    // =================================
+    // 1. RETRIEVE DOCUMENTS
+    // =================================
 
-    let relevantRetr = 0;
-    for (const expectedText of item.relevantTexts) {
-        const found = searchResponse.points.some(
-            result =>
-                result.payload.text
-                    .toLowerCase()
-                    .includes(expectedText.toLowerCase())
-        )
+    const retrievedDocuments =
+        await retrieveDocuments(
+            item.question
+        );
+
+
+    const retrievedContexts =
+        retrievedDocuments.map(
+            result => result.payload.text
+        );
+
+
+    const context =
+        retrievedContexts.join("\n");
+
+
+    console.log("\nRETRIEVED CONTEXT:");
+
+    console.log(context);
+
+
+    // =================================
+    // 2. RECALL@3
+    // =================================
+
+    let relevantRetrieved = 0;
+
+
+    for (const expectedText of item.contexts) {
+
+        const found =
+            retrievedDocuments.some(
+                result =>
+                    result.payload.text
+                        .toLowerCase()
+                        .includes(
+                            expectedText.toLowerCase()
+                        )
+            );
+
+
         if (found) {
-            console.log(` Found relevant text: "${expectedText}"`);
-            relevantRetr++;
-        }
 
+            relevantRetrieved++;
+        }
     }
 
-    const recall = relevantRetr / item.relevantTexts.length;
+
+    const recall =
+        relevantRetrieved /
+        item.contexts.length;
+
 
     console.log(
-        "Relevant documents:",
-        item.relevantTexts.length
-    );
-
-    console.log(
-        "Relevant documents retrieved:",
-        relevantRetr
-    );
-
-    console.log(
-        "Recall@3:",
+        "\nRecall@3:",
         recall
     );
 
-    console.log(
-        "Recall@3 %:",
-        (recall * 100).toFixed(2) + "%"
-    );
-
-
-    // 5. Add to total
 
     totalRecall += recall;
 
 
+    // =================================
+    // 3. CONTEXT PRECISION
+    // =================================
+
+    let relevantCount = 0;
+
+    let precisionSum = 0;
+
+
+    for (
+        let i = 0;
+        i < retrievedDocuments.length;
+        i++
+    ) {
+
+        const retrievedResult =
+            retrievedDocuments[i];
+
+
+        const found =
+            item.contexts.some(
+                expectedText =>
+                    retrievedResult.payload.text
+                        .toLowerCase()
+                        .includes(
+                            expectedText.toLowerCase()
+                        )
+            );
+
+
+        if (found) {
+
+            relevantCount++;
+
+
+            const precisionAtK =
+                relevantCount /
+                (i + 1);
+
+
+            precisionSum +=
+                precisionAtK;
+        }
+    }
+
+
+    let contextPrecision = 0;
+
+
+    if (relevantCount > 0) {
+
+        contextPrecision =
+            precisionSum /
+            relevantCount;
+    }
+
+
+    console.log(
+        "Context Precision:",
+        contextPrecision
+    );
+
+
+    totalContextPrecision +=
+        contextPrecision;
+
+
+    // =================================
+    // 4. CONTEXT RECALL
+    // =================================
+
+    let retrievedRelevant = 0;
+
+
+    for (const expectedText of item.contexts) {
+
+        const found =
+            retrievedDocuments.some(
+                result =>
+                    result.payload.text
+                        .toLowerCase()
+                        .includes(
+                            expectedText.toLowerCase()
+                        )
+            );
+
+
+        if (found) {
+
+            retrievedRelevant++;
+        }
+    }
+
+
+    const contextRecall =
+        retrievedRelevant /
+        item.contexts.length;
+
+
+    console.log(
+        "Context Recall:",
+        contextRecall
+    );
+
+
+    totalContextRecall +=
+        contextRecall;
+
+
+    // =================================
+    // 5. GENERATE ANSWER
+    // =================================
+
+    const answer =
+        await generateAnswer(
+            item.question,
+            context
+        );
+
+
+    console.log("\nGENERATED ANSWER:");
+
+    console.log(answer);
+
+
+    console.log("\nGROUND TRUTH:");
+
+    console.log(item.groundTruth);
+
+
+    // =================================
+    // 6. CREATE EVALUATION RESULT
+    // =================================
+
+    const evaluationResult = {
+
+        question: item.question,
+
+        contexts: retrievedContexts,
+
+        answer: answer,
+
+        groundTruth: item.groundTruth
+
+    };
+
+
+    evaluationResults.push(
+        evaluationResult
+    );
+
+
+    console.log(
+        "\nEVALUATION RESULT:"
+    );
+
+    console.log(
+        evaluationResult
+    );
+
+
+    // =================================
+    // 7. FAITHFULNESS
+    // =================================
+
+    const faithfulnessPrompt = `
+You are a faithfulness evaluator.
+
+Determine whether the answer is fully supported
+by the provided context.
+
+Context:
+${context}
+
+Answer:
+${answer}
+
+Return ONLY valid JSON:
+
+{
+    "faithful": true
+}
+
+Use:
+- true if the answer is fully supported by the context
+- false if the answer contains information that is not
+  supported by the context
+`;
+
+
+    const faithfulnessResponse =
+        await client.models.generateContent({
+            model: "gemini-3.5-flash-lite",
+
+            contents:
+                faithfulnessPrompt,
+
+            config: {
+                responseMimeType:
+                    "application/json"
+            }
+        });
+
+
+    const faithfulness =
+        JSON.parse(
+            faithfulnessResponse.text
+        );
+
+
+    console.log(
+        "\nFaithfulness:",
+        faithfulness
+    );
+
+
+    if (
+        faithfulness.faithful
+    ) {
+
+        totalFaithfulness++;
+    }
+
+
+    // =================================
+    // 8. ANSWER RELEVANCE
+    // =================================
+
+    const relevancePrompt = `
+You are an answer relevance evaluator.
+
+Determine whether the answer directly addresses
+the user's question.
+
+Question:
+${item.question}
+
+Answer:
+${answer}
+
+Return ONLY valid JSON:
+
+{
+    "relevant": true
+}
+
+Use:
+- true if the answer directly addresses the question
+- false if the answer does not answer the question
+  or is unrelated
+`;
+
+
+    const relevanceResponse =
+        await client.models.generateContent({
+            model: "gemini-3.1-flash-lite",
+
+            contents:
+                relevancePrompt,
+
+            config: {
+                responseMimeType:
+                    "application/json"
+            }
+        });
+
+
+    const relevance =
+        JSON.parse(
+            relevanceResponse.text
+        );
+
+
+    console.log(
+        "Answer Relevance:",
+        relevance
+    );
+
+
+    if (
+        relevance.relevant
+    ) {
+
+        totalAnswerRelevance++;
+    }
+
+
+    // =================================
+    // 9. ANSWER CORRECTNESS
+    // =================================
+
+    const correctnessPrompt = `
+You are an answer correctness evaluator.
+
+Your job is to determine whether the generated answer
+correctly answers the question when compared with the
+ground truth.
+
+Question:
+${item.question}
+
+Generated answer:
+${answer}
+
+Ground truth:
+${item.groundTruth}
+
+Return ONLY valid JSON:
+
+{
+    "correct": true
+}
+
+Use:
+- true if the generated answer is factually consistent
+  with the ground truth
+- false if the generated answer contradicts the ground truth
+  or gives an incorrect answer
+`;
+
+
+    const correctnessResponse =
+        await client.models.generateContent({
+            model: "gemini-3.1-flash-lite",
+
+            contents:
+                correctnessPrompt,
+
+            config: {
+                responseMimeType:
+                    "application/json"
+            }
+        });
+
+
+    const correctness =
+        JSON.parse(
+            correctnessResponse.text
+        );
+
+
+    console.log(
+        "Answer Correctness:",
+        correctness
+    );
+
+
+    if (
+        correctness.correct
+    ) {
+
+        totalAnswerCorrectness++;
+    }
+
 }
 
 
+// =================================
+// CALCULATE AVERAGES
+// =================================
+
 const averageRecall =
-    totalRecall / evaluationData.length;
+    totalRecall /
+    evaluationData.length;
 
-console.log("\n=================================");
-console.log(
-    "AVERAGE RECALL@3:",
-    averageRecall
-);
+
+const averageContextPrecision =
+    totalContextPrecision /
+    evaluationData.length;
+
+
+const averageContextRecall =
+    totalContextRecall /
+    evaluationData.length;
+
+
+const averageFaithfulness =
+    totalFaithfulness /
+    evaluationData.length;
+
+
+const averageAnswerRelevance =
+    totalAnswerRelevance /
+    evaluationData.length;
+
+
+const averageAnswerCorrectness =
+    totalAnswerCorrectness /
+    evaluationData.length;
+
+
+// =================================
+// FINAL SUMMARY
+// =================================
+
+console.log("\n\n=================================");
+console.log("        RAG EVALUATION SUMMARY");
+console.log("=================================");
+
 
 console.log(
-    "AVERAGE RECALL@3 %:",
+    "\nRecall@3:",
     (averageRecall * 100).toFixed(2) + "%"
 );
 
 
-//const hitRate = hit / evaluationData.length;
+console.log(
+    "Context Precision:",
+    (averageContextPrecision * 100).toFixed(2) + "%"
+);
 
-// console.log("\n=================================");
-// console.log("TOTAL QUESTIONS:", evaluationData.length);
-// console.log("TOTAL HITS:", hit);
-// console.log("HIT RATE:", hitRate);
-// console.log("HIT RATE %:", (hitRate * 100).toFixed(2) + "%");
 
+console.log(
+    "Context Recall:",
+    (averageContextRecall * 100).toFixed(2) + "%"
+);
+
+
+console.log(
+    "Faithfulness:",
+    (averageFaithfulness * 100).toFixed(2) + "%"
+);
+
+
+console.log(
+    "Answer Relevance:",
+    (averageAnswerRelevance * 100).toFixed(2) + "%"
+);
+
+
+console.log(
+    "Answer Correctness:",
+    (averageAnswerCorrectness * 100).toFixed(2) + "%"
+);
+
+
+console.log(
+    "\nTotal Evaluation Records:",
+    evaluationResults.length
+);
+
+
+console.log("\n=================================");
+
+
+fs.writeFileSync(
+    "evaluation-results.json",
+    JSON.stringify(evaluationResults, null, 2)
+);
+
+console.log(
+    "\nEvaluation results saved to evaluation-results.json"
+);
