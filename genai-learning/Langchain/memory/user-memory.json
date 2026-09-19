@@ -1,0 +1,7 @@
+{
+  "user-123": {
+    "database": "MongoDB (recently switched from PostgreSQL)",
+    "backend_tech_stack": "Node.js, PostgreSQL, and TypeScript",
+    "backend_database": "MongoDB (recently switched from PostgreSQL)"
+  }
+}
