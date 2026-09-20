@@ -5,7 +5,9 @@ import {
     createMiddleware,
     tool
 } from "langchain";
-
+import {
+    ToolMessage
+} from "@langchain/core/messages";
 import { z } from "zod";
 
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
@@ -174,13 +176,42 @@ const toolMiddleware = createMiddleware({
 
             return result;
 
-        } catch (error) {
+        }
+
+        // } catch (error) {
+
+        //     console.log("\n===== TOOL ERROR =====");
+
+        //     console.log(error);
+
+        //     throw error;
+        // }
+
+        catch (error) {
 
             console.log("\n===== TOOL ERROR =====");
 
             console.log(error);
 
-            throw error;
+            const toolCallId = request.toolCall.id;
+
+            if (!toolCallId) {
+                throw new Error(
+                    "Tool call ID is missing."
+                );
+            }
+
+            return new ToolMessage({
+
+                content: `Tool failed: ${error instanceof Error
+                        ? error.message
+                        : "Unknown tool error"
+                    }`,
+
+                tool_call_id: toolCallId,
+
+                status: "error"
+            });
         }
     }
 });
